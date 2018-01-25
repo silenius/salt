@@ -618,12 +618,13 @@ def _check_file(name):
     return ret, msg
 
 
-def _clean_dir(root, keep, exclude_pat):
+def _clean_dir(root, keep, exclude_pat, clean_verbose=True):
     '''
     Clean out all of the files and directories in a directory (root) while
     preserving the files in a list (keep) and part of exclude_pat
     '''
     removed = set()
+    removed_count = 0
     real_keep = set()
     real_keep.add(root)
     if isinstance(keep, list):
@@ -648,7 +649,12 @@ def _clean_dir(root, keep, exclude_pat):
             if not salt.utils.stringutils.check_include_exclude(
                     os.path.relpath(nfn, root), None, exclude_pat):
                 return
-            removed.add(nfn)
+
+            if clean_verbose:
+                removed.add(nfn)
+            else:
+                removed_count += 1
+
             if not __opts__['test']:
                 try:
                     os.remove(nfn)
@@ -658,7 +664,7 @@ def _clean_dir(root, keep, exclude_pat):
     for roots, dirs, files in salt.utils.path.os_walk(root):
         for name in itertools.chain(dirs, files):
             _delete_not_kept(os.path.join(roots, name))
-    return list(removed)
+    return list(removed) if clean_verbose else removed_count
 
 
 def _error(ret, err_msg):
@@ -2638,6 +2644,7 @@ def directory(name,
               win_deny_perms=None,
               win_inheritance=True,
               win_perms_reset=False,
+              clean_verbose=True,
               **kwargs):
     r'''
     Ensure that a named directory is present and has the right perms
@@ -2833,6 +2840,14 @@ def directory(name,
                 fred_snuffy:
                   perms: full_control
             - win_inheritance: False
+
+    clean_verbose : True
+        If ``False`` the number of deleted files will be returned rather than
+        the whole list. This is to prevent huge memory consumption on the
+        minions when 'clean' has to delete millions of files.
+
+        .. versionadded:: Oxygen
+
     '''
     name = os.path.expanduser(name)
     ret = {'name': name,
@@ -3124,7 +3139,7 @@ def directory(name,
         keep = _gen_keep_files(name, require, walk_d)
         log.debug('List of kept files when use file.directory with clean: %s',
                   keep)
-        removed = _clean_dir(name, list(keep), exclude_pat)
+        removed = _clean_dir(name, list(keep), exclude_pat, clean_verbose)
         if removed:
             ret['changes']['removed'] = removed
             ret['comment'] = 'Files cleaned from directory {0}'.format(name)
@@ -3550,7 +3565,7 @@ def recurse(name,
     if clean:
         # TODO: Use directory(clean=True) instead
         keep.update(_gen_keep_files(name, require))
-        removed = _clean_dir(name, list(keep), exclude_pat)
+        removed = _clean_dir(name, list(keep), exclude_pat, clean_verbose)
         if removed:
             if __opts__['test']:
                 if ret['result']:
