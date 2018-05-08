@@ -39,13 +39,14 @@ provisioner:
   max_retries: 2
   remote_states:
     name: git://github.com/saltstack/salt-jenkins.git
-    branch: 2018.3
+    branch: master
     repo: git
     testingdir: /testing
   salt_copy_filter:
     - .bundle
     - .kitchen
     - .kitchen.yml
+    - artifacts
     - Gemfile
     - Gemfile.lock
     - README.rst
