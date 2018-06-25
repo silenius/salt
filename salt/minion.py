@@ -34,8 +34,8 @@ from salt.ext.six.moves import range
 from salt.utils.zeromq import zmq, ZMQDefaultLoop, install_zmq, ZMQ_VERSION_INFO
 
 # pylint: enable=no-name-in-module,redefined-builtin
+import tornado
 
-# Import third party libs
 HAS_RANGE = False
 try:
     import seco.range
@@ -1172,7 +1172,7 @@ class Minion(MinionBase):
         # I made the following 3 line oddity to preserve traceback.
         # Please read PR #23978 before changing, hopefully avoiding regressions.
         # Good luck, we're all counting on you.  Thanks.
-        future_exception = self._connect_master_future.exc_info()
+        future_exception = self._connect_master_future.exception()
         if future_exception:
             # This needs to be re-raised to preserve restart_on_error behavior.
             raise six.reraise(*future_exception)
@@ -1565,7 +1565,15 @@ class Minion(MinionBase):
             fp_.write(minion_instance.serial.dumps(sdata))
         ret = {'success': False}
         function_name = data['fun']
-        if function_name in minion_instance.functions:
+        executors = data.get('module_executors') or \
+                    getattr(minion_instance, 'module_executors', []) or \
+                    opts.get('module_executors', ['direct_call'])
+        allow_missing_funcs = any([
+            minion_instance.executors['{0}.allow_missing_func'.format(executor)](function_name)
+            for executor in executors
+            if '{0}.allow_missing_func' in minion_instance.executors
+        ])
+        if function_name in minion_instance.functions or allow_missing_funcs is True:
             try:
                 minion_blackout_violation = False
                 if minion_instance.connected and minion_instance.opts['pillar'].get('minion_blackout', False):
@@ -1583,14 +1591,17 @@ class Minion(MinionBase):
                                              'to False in pillar or grains to resume operations. Only '
                                              'saltutil.refresh_pillar allowed in blackout mode.')
 
-                func = minion_instance.functions[function_name]
-                args, kwargs = load_args_and_kwargs(
-                    func,
-                    data['arg'],
-                    data)
+                if function_name in minion_instance.functions:
+                    func = minion_instance.functions[function_name]
+                    args, kwargs = load_args_and_kwargs(
+                        func,
+                        data['arg'],
+                        data)
+                else:
+                    # only run if function_name is not in minion_instance.functions and allow_missing_funcs is True
+                    func = function_name
+                    args, kwargs = data['arg'], data
                 minion_instance.functions.pack['__context__']['retcode'] = 0
-
-                executors = data.get('module_executors') or opts.get('module_executors', ['direct_call'])
                 if isinstance(executors, six.string_types):
                     executors = [executors]
                 elif not isinstance(executors, list) or not executors:
@@ -3370,6 +3381,8 @@ class Matcher(object):
         '''
         Runs the compound target check
         '''
+        nodegroups = self.opts.get('nodegroups', {})
+
         if not isinstance(tgt, six.string_types) and not isinstance(tgt, (list, tuple)):
             log.error('Compound target received that is neither string, list nor tuple')
             return False
@@ -3391,9 +3404,11 @@ class Matcher(object):
         if isinstance(tgt, six.string_types):
             words = tgt.split()
         else:
-            words = tgt
+            # we make a shallow copy in order to not affect the passed in arg
+            words = tgt[:]
 
-        for word in words:
+        while words:
+            word = words.pop(0)
             target_info = salt.utils.minions.parse_target(word)
 
             # Easy check first
@@ -3415,10 +3430,12 @@ class Matcher(object):
 
             elif target_info and target_info['engine']:
                 if 'N' == target_info['engine']:
-                    # Nodegroups should already be expanded/resolved to other engines
-                    log.error(
-                        'Detected nodegroup expansion failure of "%s"', word)
-                    return False
+                    # if we encounter a node group, just evaluate it in-place
+                    decomposed = salt.utils.minions.nodegroup_comp(target_info['pattern'], nodegroups)
+                    if decomposed:
+                        words = decomposed + words
+                    continue
+
                 engine = ref.get(target_info['engine'])
                 if not engine:
                     # If an unknown engine is called at any time, fail out
@@ -3591,6 +3608,7 @@ class ProxyMinion(Minion):
             self._running = False
             raise SaltSystemExit(code=-1, msg=errmsg)
 
+        self.module_executors = self.proxy.get('{0}.module_executors'.format(fq_proxyname), lambda: [])()
         proxy_init_fn = self.proxy[fq_proxyname + '.init']
         proxy_init_fn(self.opts)
 
@@ -3741,6 +3759,9 @@ class ProxyMinion(Minion):
                 minion_instance.proxy.reload_modules()
 
                 fq_proxyname = opts['proxy']['proxytype']
+
+                minion_instance.module_executors = minion_instance.proxy.get('{0}.module_executors'.format(fq_proxyname), lambda: [])()
+
                 proxy_init_fn = minion_instance.proxy[fq_proxyname + '.init']
                 proxy_init_fn(opts)
             if not hasattr(minion_instance, 'serial'):

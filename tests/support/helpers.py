@@ -57,9 +57,14 @@ from tests.support.paths import FILES, TMP
 
 # Import Salt libs
 import salt.utils.files
+import salt.utils.platform
+
+if salt.utils.platform.is_windows():
+    import salt.utils.win_functions
+else:
+    import pwd
 
 log = logging.getLogger(__name__)
-
 
 HAS_SYMLINKS = None
 
@@ -613,10 +618,10 @@ def requires_network(only_local_network=False):
     return decorator
 
 
-def with_system_user(username, on_existing='delete', delete=True):
+def with_system_user(username, on_existing='delete', delete=True, password=None):
     '''
     Create and optionally destroy a system user to be used within a test
-    case. The system user is crated using the ``user`` salt module.
+    case. The system user is created using the ``user`` salt module.
 
     The decorated testcase function must accept 'username' as an argument.
 
@@ -646,7 +651,10 @@ def with_system_user(username, on_existing='delete', delete=True):
 
             # Let's add the user to the system.
             log.debug('Creating system user {0!r}'.format(username))
-            create_user = cls.run_function('user.add', [username])
+            kwargs = {'timeout': 60}
+            if salt.utils.platform.is_windows():
+                kwargs.update({'password': password})
+            create_user = cls.run_function('user.add', [username], **kwargs)
             if not create_user:
                 log.debug('Failed to create system user')
                 # The user was not created
@@ -702,7 +710,7 @@ def with_system_user(username, on_existing='delete', delete=True):
             finally:
                 if delete:
                     delete_user = cls.run_function(
-                        'user.delete', [username, True, True]
+                        'user.delete', [username, True, True], timeout=60
                     )
                     if not delete_user:
                         if failure is None:
@@ -1117,7 +1125,6 @@ def requires_salt_modules(*names):
 
 
 def skip_if_binaries_missing(*binaries, **kwargs):
-    import salt.utils
     import salt.utils.path
     if len(binaries) == 1:
         if isinstance(binaries[0], (list, tuple, set, frozenset)):
@@ -1156,7 +1163,6 @@ def skip_if_not_root(func):
             func.__unittest_skip__ = True
             func.__unittest_skip_why__ = 'You must be logged in as root to run this test'
     else:
-        import salt.utils.win_functions
         current_user = salt.utils.win_functions.get_current_user()
         if current_user != 'SYSTEM':
             if not salt.utils.win_functions.is_admin(current_user):
@@ -1569,3 +1575,32 @@ class Webserver(object):
         '''
         self.ioloop.add_callback(self.ioloop.stop)
         self.server_thread.join()
+
+
+def win32_kill_process_tree(pid, sig=signal.SIGTERM, include_parent=True,
+        timeout=None, on_terminate=None):
+    '''
+    Kill a process tree (including grandchildren) with signal "sig" and return
+    a (gone, still_alive) tuple.  "on_terminate", if specified, is a callabck
+    function which is called as soon as a child terminates.
+    '''
+    if pid == os.getpid():
+        raise RuntimeError("I refuse to kill myself")
+    parent = psutil.Process(pid)
+    children = parent.children(recursive=True)
+    if include_parent:
+        children.append(parent)
+    for p in children:
+        p.send_signal(sig)
+    gone, alive = psutil.wait_procs(children, timeout=timeout,
+                                    callback=on_terminate)
+    return (gone, alive)
+
+
+def this_user():
+    '''
+    Get the user associated with the current process.
+    '''
+    if salt.utils.platform.is_windows():
+        return salt.utils.win_functions.get_current_user(with_domain=False)
+    return pwd.getpwuid(os.getuid())[0]

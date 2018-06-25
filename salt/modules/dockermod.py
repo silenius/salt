@@ -19,7 +19,7 @@ Management of Docker Containers
 .. _lxc-attach: https://linuxcontainers.org/lxc/manpages/man1/lxc-attach.1.html
 .. _nsenter: http://man7.org/linux/man-pages/man1/nsenter.1.html
 .. _docker-exec: http://docs.docker.com/reference/commandline/cli/#exec
-.. _`low-level API`: http://docker-py.readthedocs.io/en/stable/api.html
+.. _`docker-py Low-level API`: http://docker-py.readthedocs.io/en/stable/api.html
 .. _timelib: https://pypi.python.org/pypi/timelib
 .. _`trusted builds`: https://blog.docker.com/2013/11/introducing-trusted-builds/
 .. _`Docker Engine API`: https://docs.docker.com/engine/api/v1.33/#operation/ContainerCreate
@@ -201,6 +201,7 @@ import pipes
 import re
 import shutil
 import string
+import sys
 import time
 import uuid
 import subprocess
@@ -257,6 +258,7 @@ __func_alias__ = {
     'signal_': 'signal',
     'start_': 'start',
     'tag_': 'tag',
+    'apply_': 'apply'
 }
 
 # Minimum supported versions
@@ -270,6 +272,13 @@ NOTSET = object()
 # Define the module's virtual name and alias
 __virtualname__ = 'docker'
 __virtual_aliases__ = ('dockerng', 'moby')
+
+__proxyenabled__ = ['docker']
+__outputter__ = {
+    'sls': 'highstate',
+    'apply_': 'highstate',
+    'highstate': 'highstate',
+}
 
 
 def __virtual__():
@@ -788,7 +797,7 @@ def get_client_args(limit=None):
         Added ability to limit the input to specific client functions
 
     Many functions in Salt have been written to support the full list of
-    arguments for a given function in docker-py's `low-level API`_. However,
+    arguments for a given function in the `docker-py Low-level API`_. However,
     depending on the version of docker-py installed on the minion, the
     available arguments may differ. This function will get the arguments for
     various functions in the installed version of docker-py, to be used as a
@@ -996,17 +1005,17 @@ def compare_container_networks(first, second):
     :py:func:`docker_container.running <salt.states.docker_container.running>`
     state), automatic IP configuration will also be checked in these cases.
 
-    This function uses the :minion_opts:`docker.compare_container_networks`
+    This function uses the :conf_minion:`docker.compare_container_networks`
     minion config option to determine which keys to examine. This provides
     flexibility in the event that features added in a future Docker release
     necessitate changes to how Salt compares networks. In these cases, rather
     than waiting for a new Salt release one can just set
-    :minion_opts:`docker.compare_container_networks`.
+    :conf_minion:`docker.compare_container_networks`.
 
     .. note::
         The checks for automatic IP configuration described above only apply if
         ``IPAMConfig`` is among the keys set for static IP checks in
-        :minion_opts:`docker.compare_container_networks`.
+        :conf_minion:`docker.compare_container_networks`.
 
     first
         Name or ID of first container (old)
@@ -2082,6 +2091,16 @@ def port(name, private_port=None):
     name
         Container name or ID
 
+        .. versionchanged:: Fluorine
+            This value can now be a pattern expression (using the
+            pattern-matching characters defined in fnmatch_). If a pattern
+            expression is used, this function will return a dictionary mapping
+            container names which match the pattern to the mappings for those
+            containers. When no pattern expression is used, a dictionary of the
+            mappings for the specified container name will be returned.
+
+        .. _fnmatch: https://docs.python.org/2/library/fnmatch.html
+
     private_port : None
         If specified, get information for that specific port. Can be specified
         either as a port number (i.e. ``5000``), or as a port number plus the
@@ -2104,12 +2123,10 @@ def port(name, private_port=None):
         salt myminion docker.port mycontainer 5000
         salt myminion docker.port mycontainer 5000/udp
     '''
-    # docker.client.Client.port() doesn't do what we need, so just inspect the
-    # container and get the information from there. It's what they're already
-    # doing (poorly) anyway.
-    mappings = inspect_container(name).get('NetworkSettings', {}).get('Ports', {})
-    if not mappings:
-        return {}
+    pattern_used = bool(re.search(r'[*?\[]', name))
+    names = fnmatch.filter(list_containers(all=True), name) \
+        if pattern_used \
+        else [name]
 
     if private_port is None:
         pattern = '*'
@@ -2132,7 +2149,17 @@ def port(name, private_port=None):
             except AttributeError:
                 raise SaltInvocationError(err)
 
-    return dict((x, mappings[x]) for x in fnmatch.filter(mappings, pattern))
+    ret = {}
+    for c_name in names:
+        # docker.client.Client.port() doesn't do what we need, so just inspect
+        # the container and get the information from there. It's what they're
+        # already doing (poorly) anyway.
+        mappings = inspect_container(c_name).get(
+            'NetworkSettings', {}).get('Ports', {})
+        ret[c_name] = dict((x, mappings[x])
+                           for x in fnmatch.filter(mappings, pattern))
+
+    return ret.get(name, {}) if not pattern_used else ret
 
 
 def ps_(filters=None, **kwargs):
@@ -2802,9 +2829,9 @@ def create(image,
 
         Example:
 
-        - ``log_opt="syslog-address=tcp://192.168.0.42,syslog-facility=daemon"
-        - ``log_opt="['syslog-address=tcp://192.168.0.42', 'syslog-facility=daemon']"
-        - ``log_opt="{'syslog-address': 'tcp://192.168.0.42', 'syslog-facility: daemon
+        - ``log_opt="syslog-address=tcp://192.168.0.42,syslog-facility=daemon"``
+        - ``log_opt="['syslog-address=tcp://192.168.0.42', 'syslog-facility=daemon']"``
+        - ``log_opt="{'syslog-address': 'tcp://192.168.0.42', 'syslog-facility': 'daemon'}"``
 
     lxc_conf
         Additional LXC configuration parameters to set before starting the
@@ -3210,6 +3237,7 @@ def run_container(image,
     CLI Examples:
 
     .. code-block:: bash
+
         salt myminion docker.run_container myuser/myimage command=/usr/local/bin/myscript.sh
         # Run container in the background
         salt myminion docker.run_container myuser/myimage command=/usr/local/bin/myscript.sh bg=True
@@ -5068,7 +5096,7 @@ def create_network(name,
         other issues to be more easily worked around. See the following links
         for more information:
 
-        - docker-py `low-level API`_
+        - `docker-py Low-level API`_
         - `Docker Engine API`_
 
         .. versionadded:: 2018.3.0
@@ -5158,6 +5186,8 @@ def create_network(name,
             turned on without an IPv6 subnet explicitly configured, you will
             get an error unless you have set up a fixed IPv6 subnet. Consult
             the `Docker IPv6 docs`_ for information on how to do this.
+
+            .. _`Docker IPv6 docs`: https://docs.docker.com/v17.09/engine/userguide/networking/default_network/ipv6/
 
     attachable : False
         If ``True``, and the network is in the global scope, non-service
@@ -6567,6 +6597,9 @@ def _compile_state(sls_opts, mods=None):
     '''
     st_ = HighState(sls_opts)
 
+    if not mods:
+        return st_.compile_low_chunks()
+
     high_data, errors = st_.render_highstate({sls_opts['saltenv']: mods})
     high_data, ext_errors = st_.state.reconcile_extend(high_data)
     errors += ext_errors
@@ -6639,7 +6672,7 @@ def call(name, function, *args, **kwargs):
 
     try:
         salt_argv = [
-            'python',
+            'python{0}'.format(sys.version_info[0]),
             os.path.join(thin_dest_path, 'salt-call'),
             '--metadata',
             '--local',
@@ -6671,6 +6704,27 @@ def call(name, function, *args, **kwargs):
         # delete the thin dir so that it does not end in the image
         rm_thin_argv = ['rm', '-rf', thin_dest_path]
         run_all(name, subprocess.list2cmdline(rm_thin_argv))
+
+
+def apply_(name, mods=None, **kwargs):
+    '''
+    .. versionadded:: Fluorine
+
+    Apply states! This function will call highstate or state.sls based on the
+    arguments passed in, ``apply`` is intended to be the main gateway for
+    all state executions.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt 'docker' docker.apply web01
+        salt 'docker' docker.apply web01 test
+        salt 'docker' docker.apply web01 test,pkgs
+    '''
+    if mods:
+        return sls(name, mods, **kwargs)
+    return highstate(name, **kwargs)
 
 
 def sls(name, mods=None, **kwargs):
@@ -6788,6 +6842,31 @@ def sls(name, mods=None, **kwargs):
     else:
         __context__['retcode'] = 0
     return ret
+
+
+def highstate(name, saltenv='base', **kwargs):
+    '''
+    Apply a highstate to the running container
+
+    .. versionadded:: Fluorine
+
+    The container does not need to have Salt installed, but Python is required.
+
+    name
+        Container name or ID
+
+    saltenv : base
+        Specify the environment from which to retrieve the SLS indicated by the
+        `mods` parameter.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt myminion docker.highstate compassionate_mirzakhani
+
+    '''
+    return sls(name, saltenv='base', **kwargs)
 
 
 def sls_build(repository,
