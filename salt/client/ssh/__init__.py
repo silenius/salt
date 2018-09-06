@@ -351,7 +351,9 @@ class SSH(object):
             return
 
         hostname = self.opts['tgt'].split('@')[-1]
-        needs_expansion = '*' not in hostname and salt.utils.network.is_reachable_host(hostname)
+        needs_expansion = '*' not in hostname and \
+                          salt.utils.network.is_reachable_host(hostname) and \
+                          salt.utils.network.is_ip(hostname)
         if needs_expansion:
             hostname = salt.utils.network.ip_to_host(hostname)
             if hostname is None:
@@ -701,7 +703,7 @@ class SSH(object):
         '''
         Execute the overall routine, print results via outputters
         '''
-        if self.opts['list_hosts']:
+        if self.opts.get('list_hosts'):
             self._get_roster()
             ret = {}
             for roster_file in self.__parsed_rosters:
@@ -1249,7 +1251,10 @@ ARGS = {arguments}\n'''.format(config=self.minion_config,
             shim_tmp_file.write(salt.utils.stringutils.to_bytes(cmd_str))
 
         # Copy shim to target system, under $HOME/.<randomized name>
-        target_shim_file = '.{0}.{1}'.format(binascii.hexlify(os.urandom(6)).decode('ascii'), extension)
+        target_shim_file = '.{0}.{1}'.format(
+            binascii.hexlify(os.urandom(6)).decode('ascii'),
+            extension
+        )
         if self.winrm:
             target_shim_file = saltwinshell.get_target_shim_file(self, target_shim_file)
         self.shell.send(shim_tmp_file.name, target_shim_file, makedirs=True)

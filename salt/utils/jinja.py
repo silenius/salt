@@ -309,6 +309,26 @@ def to_bool(val):
     return False
 
 
+@jinja_filter('tojson')
+def tojson(val, indent=None):
+    '''
+    Implementation of tojson filter (only present in Jinja 2.9 and later). If
+    Jinja 2.9 or later is installed, then the upstream version of this filter
+    will be used.
+    '''
+    options = {'ensure_ascii': True}
+    if indent is not None:
+        options['indent'] = indent
+    return (
+        salt.utils.json.dumps(
+            val, **options
+        ).replace('<', '\\u003c')
+         .replace('>', '\\u003e')
+         .replace('&', '\\u0026')
+         .replace("'", '\\u0027')
+    )
+
+
 @jinja_filter('quote')
 def quote(txt):
     '''
@@ -827,14 +847,21 @@ class SerializerExtension(Extension, object):
         return explore(data)
 
     def format_json(self, value, sort_keys=True, indent=None):
-        return Markup(salt.utils.json.dumps(value, sort_keys=sort_keys, indent=indent).strip())
+        json_txt = salt.utils.json.dumps(value, sort_keys=sort_keys, indent=indent).strip()
+        try:
+            return Markup(json_txt)
+        except UnicodeDecodeError:
+            return Markup(salt.utils.stringutils.to_unicode(json_txt))
 
     def format_yaml(self, value, flow_style=True):
         yaml_txt = salt.utils.yaml.safe_dump(
             value, default_flow_style=flow_style).strip()
-        if yaml_txt.endswith('\n...'):
+        if yaml_txt.endswith(str('\n...')):  # future lint: disable=blacklisted-function
             yaml_txt = yaml_txt[:len(yaml_txt)-4]
-        return Markup(yaml_txt)
+        try:
+            return Markup(yaml_txt)
+        except UnicodeDecodeError:
+            return Markup(salt.utils.stringutils.to_unicode(yaml_txt))
 
     def format_xml(self, value):
         """Render a formatted multi-line XML string from a complex Python

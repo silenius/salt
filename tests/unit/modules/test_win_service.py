@@ -139,12 +139,16 @@ class WinServiceTestCase(TestCase, LoaderModuleMockMixin):
         '''
         mock_true = MagicMock(return_value=True)
         mock_false = MagicMock(return_value=False)
-        mock_info = MagicMock(side_effect=[{'Status': 'Running'},
-                                           {'Status': 'Stop Pending'},
-                                           {'Status': 'Stopped'}])
+        mock_info = MagicMock(side_effect=[{'Status': 'Stopped'}])
 
-        with patch.dict(win_service.__salt__, {'cmd.run': MagicMock(return_value="service was stopped")}):
+        with patch.dict(win_service.__salt__, {'cmd.run': MagicMock(return_value="service was stopped")}), \
+                patch.object(win32serviceutil, 'StopService', mock_true), \
+                patch.object(win_service, '_status_wait', mock_info):
             self.assertTrue(win_service.stop('spongebob'))
+
+        mock_info = MagicMock(side_effect=[{'Status': 'Running', 'Status_WaitHint': 0},
+                                           {'Status': 'Stop Pending', 'Status_WaitHint': 0},
+                                           {'Status': 'Stopped'}])
 
         with patch.dict(win_service.__salt__, {'cmd.run': MagicMock(return_value="service was stopped")}), \
                 patch.object(win32serviceutil, 'StopService', mock_true), \
@@ -240,6 +244,18 @@ class WinServiceTestCase(TestCase, LoaderModuleMockMixin):
         with patch.object(win_service, 'info', mock):
             self.assertTrue(win_service.enabled('spongebob'))
             self.assertFalse(win_service.enabled('squarepants'))
+
+    def test_enabled_with_space_in_name(self):
+        '''
+            Test to check to see if the named
+            service is enabled to start on boot
+            when have space in service name
+        '''
+        mock = MagicMock(side_effect=[{'StartType': 'Auto'},
+                                      {'StartType': 'Disabled'}])
+        with patch.object(win_service, 'info', mock):
+            self.assertTrue(win_service.enabled('spongebob test'))
+            self.assertFalse(win_service.enabled('squarepants test'))
 
     def test_disabled(self):
         '''
