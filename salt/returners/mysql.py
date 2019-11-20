@@ -278,7 +278,7 @@ def _get_serv(ret=None, commit=False):
         error = err.args
         sys.stderr.write(six.text_type(error))
         cursor.execute("ROLLBACK")
-        raise err
+        six.reraise(*sys.exc_info())
     else:
         if commit:
             cursor.execute("COMMIT")
@@ -339,7 +339,7 @@ def save_load(jid, load, minions=None):
             cur.execute(sql, (jid, salt.utils.json.dumps(load)))
         except MySQLdb.IntegrityError:
             # https://github.com/saltstack/salt/issues/22171
-            # Without this try:except: we get tons of duplicate entry errors
+            # Without this try/except we get tons of duplicate entry errors
             # which result in job returns not being stored properly
             pass
 

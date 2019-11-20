@@ -55,6 +55,7 @@ Ensure a Linux ACL list does not exist
 
 # Import Python libs
 from __future__ import absolute_import, print_function, unicode_literals
+import logging
 import os
 
 # Import salt libs
@@ -62,8 +63,6 @@ from salt.ext import six
 from salt.exceptions import CommandExecutionError
 import salt.utils.path
 
-
-import logging
 log = logging.getLogger(__name__)
 
 __virtualname__ = 'acl'
@@ -104,17 +103,17 @@ def present(name, acl_type, acl_name='', perms='', recurse=False, force=False):
     ret = {'name': name,
            'result': True,
            'changes': {},
-           'pchanges': {},
            'comment': ''}
 
     _octal = {'r': 4, 'w': 2, 'x': 1, '-': 0}
+    _octal_lookup = {0: '-', 1: 'r', 2: 'w', 4: 'x'}
 
     if not os.path.exists(name):
         ret['comment'] = '{0} does not exist'.format(name)
         ret['result'] = False
         return ret
 
-    __current_perms = __salt__['acl.getfacl'](name)
+    __current_perms = __salt__['acl.getfacl'](name, recursive=recurse)
 
     if acl_type.startswith(('d:', 'default:')):
         _acl_type = ':'.join(acl_type.split(':')[1:])
@@ -145,23 +144,38 @@ def present(name, acl_type, acl_name='', perms='', recurse=False, force=False):
             user = None
 
         if user:
-            if user[_search_name]['octal'] == sum([_octal.get(i, i) for i in perms]):
+            octal_sum = sum([_octal.get(i, i) for i in perms])
+            need_refresh = False
+            for path in __current_perms:
+                acl_found = False
+                for user_acl in __current_perms[path].get(_acl_type, []):
+                    if _search_name in user_acl and user_acl[_search_name]['octal'] == octal_sum:
+                        acl_found = True
+                        break
+                if not acl_found:
+                    need_refresh = True
+                    break
+            if not need_refresh:
                 ret['comment'] = 'Permissions are in the desired state'
             else:
+                _num = user[_search_name]['octal']
+                new_perms = '{}{}{}'.format(_octal_lookup[_num & 1],
+                                            _octal_lookup[_num & 2],
+                                            _octal_lookup[_num & 4])
                 changes = {'new': {'acl_name': acl_name,
                                    'acl_type': acl_type,
                                    'perms': perms},
                            'old': {'acl_name': acl_name,
                                    'acl_type': acl_type,
-                                   'perms': six.text_type(user[_search_name]['octal'])}}
+                                   'perms': new_perms}}
 
                 if __opts__['test']:
                     ret.update({'comment': 'Updated permissions will be applied for '
                                            '{0}: {1} -> {2}'.format(
                         acl_name,
-                        six.text_type(user[_search_name]['octal']),
+                        new_perms,
                         perms),
-                        'result': None, 'pchanges': changes})
+                        'result': None, 'changes': changes})
                     return ret
                 try:
                     if force:
@@ -184,7 +198,7 @@ def present(name, acl_type, acl_name='', perms='', recurse=False, force=False):
             if __opts__['test']:
                 ret.update({'comment': 'New permissions will be applied for '
                                        '{0}: {1}'.format(acl_name, perms),
-                            'result': None, 'pchanges': changes})
+                            'result': None, 'changes': changes})
                 ret['result'] = None
                 return ret
 
@@ -238,7 +252,7 @@ def absent(name, acl_type, acl_name='', perms='', recurse=False):
         ret['result'] = False
         return ret
 
-    __current_perms = __salt__['acl.getfacl'](name)
+    __current_perms = __salt__['acl.getfacl'](name, recursive=recurse)
 
     if acl_type.startswith(('d:', 'default:')):
         _acl_type = ':'.join(acl_type.split(':')[1:])
@@ -268,7 +282,18 @@ def absent(name, acl_type, acl_name='', perms='', recurse=False):
         except (AttributeError, IndexError, StopIteration, KeyError):
             user = None
 
-        if user:
+        need_refresh = False
+        for path in __current_perms:
+            acl_found = False
+            for user_acl in __current_perms[path].get(_acl_type, []):
+                if _search_name in user_acl:
+                    acl_found = True
+                    break
+            if acl_found:
+                need_refresh = True
+                break
+
+        if user or need_refresh:
             ret['comment'] = 'Removing permissions'
 
             if __opts__['test']:
@@ -315,7 +340,6 @@ def list_present(name, acl_type, acl_names=None, perms='', recurse=False, force=
     ret = {'name': name,
            'result': True,
            'changes': {},
-           'pchanges': {},
            'comment': ''}
 
     _octal = {'r': 4, 'w': 2, 'x': 1, '-': 0}
@@ -359,7 +383,6 @@ def list_present(name, acl_type, acl_names=None, perms='', recurse=False, force=
             ret = {'name': name,
                    'result': True,
                    'changes': {},
-                   'pchanges': {},
                    'comment': 'Permissions and {}s are in the desired state'.format(acl_type)}
             return ret
     # The getfacl execution module lists default with empty names as being
@@ -403,7 +426,7 @@ def list_present(name, acl_type, acl_names=None, perms='', recurse=False, force=
                                 acl_names,
                                 six.text_type(users[search_name]['octal']),
                                 perms),
-                                'result': None, 'pchanges': changes})
+                                'result': None, 'changes': changes})
                             return ret
                         try:
                             if force:
@@ -427,7 +450,7 @@ def list_present(name, acl_type, acl_names=None, perms='', recurse=False, force=
                     if __opts__['test']:
                         ret.update({'comment': 'New permissions will be applied for '
                                                '{0}: {1}'.format(acl_names, perms),
-                                    'result': None, 'pchanges': changes})
+                                    'result': None, 'changes': changes})
                         ret['result'] = None
                         return ret
 
@@ -454,7 +477,7 @@ def list_present(name, acl_type, acl_names=None, perms='', recurse=False, force=
             if __opts__['test']:
                 ret.update({'comment': 'New permissions will be applied for '
                                        '{0}: {1}'.format(acl_names, perms),
-                            'result': None, 'pchanges': changes})
+                            'result': None, 'changes': changes})
                 ret['result'] = None
                 return ret
 
